@@ -1,0 +1,22 @@
+{
+    "topic": "",
+    "methodology": "",
+    "prequeist_knowledge": "",
+    "depth": "",
+    "level": "",
+    "teaching_style": "",
+    "question": "",
+    "roadmap": [],
+    "length": 0,
+    "progress": 0,
+    "last_completed": "error_human_intervention_discarded",
+    "no_of_attempts_local": 0,
+    "no_of_attempts_global": 0,
+    "status": "stopped",
+    "failed_at": "continue_from_last_state",
+    "meta_prompt": "",
+    "prompts": "",
+    "filename": "",
+    "answers": "",
+    "summary": []
+}
