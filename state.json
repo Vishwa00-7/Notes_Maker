@@ -5,6 +5,8 @@
     "depth": "",
     "level": "",
     "teaching_style": "",
+    "selected_model": "chatgpt",
+    "show_preview": true,
     "question": "",
     "roadmap": [],
     "length": 0,

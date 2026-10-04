@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import questionary
-from Models import chatgpt, meta, qwen
+from Models import AVAILABLE_MODELS, chatgpt, get_model, meta, qwen, space_bunny
 from Prompts import master_prompt, meta_prompt_genrator
 from State import State
 
@@ -155,6 +155,33 @@ def extract_json_payload(raw_content: str) -> dict:
         return json.loads(match.group(1))
 
     raise ValueError(f"Could not parse valid JSON from response: {raw_content[:200]}...")
+
+
+def print_output_preview(content: str, max_lines: int = 3, label: str = "Model Output") -> None:
+    """Print the first few lines of model output preview while working."""
+    if not content or not str(content).strip():
+        return
+
+    # Extract non-empty lines for clean preview
+    raw_lines = str(content).strip().splitlines()
+    preview_lines = []
+    for line in raw_lines:
+        trimmed = line.strip()
+        if trimmed:
+            preview_lines.append(trimmed)
+        if len(preview_lines) >= max_lines:
+            break
+
+    if not preview_lines:
+        return
+
+    print("\n" + "-" * 65)
+    print(f"[PREVIEW] {label} (First {len(preview_lines)} lines):")
+    print("-" * 65)
+    for idx, line in enumerate(preview_lines, 1):
+        display_line = (line[:115] + "...") if len(line) > 115 else line
+        print(f"  {idx} | {display_line}")
+    print("-" * 65 + "\n")
 
 
 # -----------------------------------------------------------------------------
@@ -320,9 +347,24 @@ def continue_from_last_state(state: State) -> Dict[str, Any]:
 
             loaded_state = load_state(topic)
             if loaded_state:
+                saved_model = loaded_state.get("selected_model")
+                if not saved_model:
+                    model_choices = list(AVAILABLE_MODELS.keys())
+                    saved_model = questionary.select(
+                        "Choose the AI Model to resume with: ",
+                        choices=model_choices,
+                        default=model_choices[0]
+                    ).ask() or model_choices[0]
+                else:
+                    print(f"[MODEL] Resuming with model: '{saved_model}'")
+
+                saved_preview = loaded_state.get("show_preview", True)
+
                 return {
                     "topic": loaded_state.get("topic", topic),
                     "prequeist_knowledge": loaded_state.get("prequeist_knowledge", ""),
+                    "selected_model": saved_model,
+                    "show_preview": saved_preview,
                     "methodology": loaded_state.get("methodology", "Standard Textbook Chapter"),
                     "depth": loaded_state.get("depth", "Standard Foundation"),
                     "teaching_style": loaded_state.get("teaching_style", "Direct & Authoritative"),
@@ -352,7 +394,7 @@ def continue_from_last_state(state: State) -> Dict[str, Any]:
 
 
 def getInput(state: State) -> Dict[str, Any]:
-    """Interactively collect curriculum settings with error handling."""
+    """Interactively collect curriculum settings, model selection, and preview preference."""
     try:
         topic = input("Enter the Topic : ").strip()
         if not topic:
@@ -361,6 +403,22 @@ def getInput(state: State) -> Dict[str, Any]:
         pk = input("Enter the Prerequisite Knowledge you have : ").strip()
         if not pk:
             pk = "None (Beginner)"
+
+        model_choices = list(AVAILABLE_MODELS.keys())
+        selected_model = questionary.select(
+            "Choose the AI Model to use for the entire process : ",
+            choices=model_choices,
+            default=model_choices[0]
+        ).ask()
+        if not selected_model:
+            selected_model = model_choices[0]
+
+        show_preview = questionary.confirm(
+            "Preview model output while working (first 3 lines)?",
+            default=True
+        ).ask()
+        if show_preview is None:
+            show_preview = True
 
         methodology = questionary.select("Choose the Methodology : ", choices=methodologies).ask()
         if not methodology or methodology == "Like ChatGPT":
@@ -381,6 +439,8 @@ def getInput(state: State) -> Dict[str, Any]:
         return {
             "topic": topic,
             "prequeist_knowledge": pk,
+            "selected_model": selected_model,
+            "show_preview": show_preview,
             "methodology": methodology,
             "depth": depth,
             "teaching_style": teaching_style,
@@ -397,6 +457,8 @@ def getInput(state: State) -> Dict[str, Any]:
         return {
             "topic": state.get("topic", "Default Study"),
             "prequeist_knowledge": state.get("prequeist_knowledge", "None"),
+            "selected_model": state.get("selected_model", list(AVAILABLE_MODELS.keys())[0]),
+            "show_preview": state.get("show_preview", True),
             "methodology": state.get("methodology", dictionary_for_chatGPT["teaching_methodology"]),
             "depth": state.get("depth", dictionary_for_chatGPT["depth_of_explanation"]),
             "teaching_style": state.get("teaching_style", dictionary_for_chatGPT["teaching_style"]),
@@ -410,7 +472,7 @@ def getInput(state: State) -> Dict[str, Any]:
 
 
 def generate_roadmap(state: State) -> Dict[str, Any]:
-    """Generate structured curriculum roadmap via ChatGPT with 3-attempt retry."""
+    """Generate structured curriculum roadmap via selected LLM with 3-attempt retry."""
     def _op():
         prompt = master_prompt.invoke({
             "topic": state.get("topic", ""),
@@ -422,20 +484,23 @@ def generate_roadmap(state: State) -> Dict[str, Any]:
             "last_completed": "generate_roadmap"
         })
 
-        result = chatgpt.invoke(prompt)
+        model_name = state.get("selected_model", "chatgpt")
+        model = get_model(model_name)
+        result = model.invoke(prompt)
         raw_content = result.content if hasattr(result, "content") else str(result)
         if not raw_content or not raw_content.strip():
             raise ValueError("Curriculum planner returned empty response. Check token limits.")
 
-        parsed = extract_json_payload(raw_content)
+        if state.get("show_preview", True):
+            print_output_preview(raw_content, max_lines=3, label=f"Curriculum Roadmap JSON ({model_name})")
 
-        
+        parsed = extract_json_payload(raw_content)
 
         curriculum = parsed.get("curriculum", [])
         if not curriculum:
             raise ValueError("Curriculum is empty in LLM response.")
 
-        print(f"[SUCCESS] Roadmap successfully generated with {len(curriculum)} modules.")
+        print(f"[SUCCESS] Roadmap successfully generated with {len(curriculum)} modules (Model: '{model_name}').")
 
         # Create a folder with the name of the topic
         create_folder(state.get("topic", "default_topic"))
@@ -456,7 +521,7 @@ def generate_roadmap(state: State) -> Dict[str, Any]:
 
 
 def generate_meta_prompt(state: State) -> Dict[str, Any]:
-    """Generate module-specific prompt via Meta LLM with 3-attempt retry."""
+    """Generate module-specific prompt via selected LLM with 3-attempt retry."""
     def _op():
         index = state.get("progress", 0)
         roadmap = state.get("roadmap", [])
@@ -480,11 +545,16 @@ def generate_meta_prompt(state: State) -> Dict[str, Any]:
             "last_completed": "generate_meta_prompt"
         })
 
-        # Call meta LLM to generate the specialized downstream prompt
-        res = meta.invoke(prompt)
+        # Call selected LLM to generate the specialized downstream prompt
+        model_name = state.get("selected_model", "chatgpt")
+        model = get_model(model_name)
+        res = model.invoke(prompt)
         meta_prompt_text = res.content if hasattr(res, "content") else str(res)
 
-        print(f"[SUCCESS] Meta-prompt generated for: '{title}'.")
+        if state.get("show_preview", True):
+            print_output_preview(meta_prompt_text, max_lines=3, label=f"Meta-Prompt for '{title}' ({model_name})")
+
+        print(f"[SUCCESS] Meta-prompt generated for: '{title}' (Model: '{model_name}').")
         return {
             "meta_prompt": meta_prompt_text,
             "filename": file_name,
@@ -501,18 +571,24 @@ def generate_meta_prompt(state: State) -> Dict[str, Any]:
 
 
 def generate_content(state: State) -> Dict[str, Any]:
-    """Generate Markdown content via Qwen LLM with 3-attempt retry."""
+    """Generate Markdown content via selected LLM with 3-attempt retry."""
     def _op():
         prompt = state.get("meta_prompt")
         if not prompt:
             raise ValueError("No meta_prompt found in state to generate content.")
 
-        result = qwen.invoke(prompt)
+        model_name = state.get("selected_model", "chatgpt")
+        model = get_model(model_name)
+        result = model.invoke(prompt)
         content = result.content if hasattr(result, "content") else str(result)
         if not content or not content.strip():
             raise ValueError("Generated content from model was empty.")
 
-        print("[SUCCESS] Module content successfully generated by Qwen.")
+        if state.get("show_preview", True):
+            note_slug = state.get("filename", f"module_{state.get('progress', 0)}")
+            print_output_preview(content, max_lines=3, label=f"Generated Note Content for '{note_slug}' ({model_name})")
+
+        print(f"[SUCCESS] Module content successfully generated (Model: '{model_name}').")
         return {
             "answers": content,
             "last_completed": "generate_content"

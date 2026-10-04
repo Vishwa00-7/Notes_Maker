@@ -1,23 +1,29 @@
 # 📚 Notes Maker — AI-Powered Knowledge Graph & Curriculum Generator
 
-An intelligent, multi-agent study material and curriculum generation pipeline powered by **LangGraph**, **LangChain**, and high-performance LLMs (via Groq and OpenRouter). 
+An intelligent, multi-stage study material and curriculum generation pipeline powered by **LangGraph**, **LangChain**, and high-performance LLM orchestration via **Groq** (`openai/gpt-oss-120b`). 
 
 Instead of generating a monolithic block of text, **Notes Maker** treats a subject as a **non-linear knowledge graph**. It creates an interconnected web of structured Markdown notes featuring cross-links, visual diagrams, strict scope boundaries, and fully tailored pedagogical styles.
 
 ## 🚀 Key Features
 
 - **Non-Linear Knowledge Graph Architecture**: Breaks down subjects into modular subtopics (`.md` files) with strict scope boundaries to prevent overlapping explanations, automatically cross-linking related modules using relative Markdown links (`[Topic](./other-topic.md)`).
-- **Multi-Agent / Multi-Model Specialization**:
-  - **Curriculum Architect** (`chatgpt` / `openai/gpt-oss-20b`): Generates structured JSON curriculum schemas and maps relational links.
-  - **Meta-Prompt Engineer** (`meta` / `openai/gpt-oss-20b`): Dynamically constructs hyper-focused prompt instructions for each module.
-  - **Content Generator** (`qwen` / `qwen/qwen3.8-27b`): Writes in-depth, rich Markdown notes adhering to pedagogical rules, tables, and Mermaid graphs.
+- **Dynamic AI Model Selection**:
+  - At the start of the workflow (in `getInput`), users choose which AI model to use throughout the entire process (`chatgpt`, `meta`, `qwen`, `space_bunny`, etc.).
+  - The chosen model executes all three key reasoning stages end-to-end:
+    - **Curriculum Architect** (`generate_roadmap`): Generates structured JSON curriculum schemas and maps non-linear relational links using `master_prompt`.
+    - **Meta-Prompt Engineer** (`generate_meta_prompt`): Dynamically constructs hyper-focused prompt instructions for each module using `meta_prompt_genrator`.
+    - **Content Generator** (`generate_content`): Writes in-depth, rich Markdown notes adhering to pedagogical rules, tables, and Mermaid graphs.
+  - The selected model is saved in `<topic>/state.json` and automatically restored when resuming via `continue_from_last_state`.
+- **Live Model Output Preview (First 3 Lines)**:
+  - Configurable option in `getInput` (`show_preview`) to display live previews of each model's generation in real-time.
+  - While processing, displays the first 3 lines of output from each stage (Curriculum Roadmap JSON, Meta-Prompt instructions, and generated Markdown notes) in formatted terminal boxes.
 - **Deep Pedagogical Customization**:
   - **Methodologies**: Standard Textbook, Cheat Sheet, Case-Study Driven, Visual/Structural Notes, Flashcard/Q&A, or "Like ChatGPT".
   - **Depth Levels**: Primer / Crash Course, Standard Foundation, Comprehensive Review, Advanced / Specialized, Academic / Theoretical.
   - **Verbosity Levels**: From brief (~300–500 words) up to exhaustive (3000+ words).
   - **Teaching Styles**: Direct & Authoritative, Socratic Method, Conversational, Storytelling, Humorous & Witty.
 - **State Persistence & Resumption**:
-  - Progress and roadmap states are tracked in `<topic>/state.json`.
+  - Progress, selected model, preview settings, and roadmap states are tracked in `<topic>/state.json`.
   - Pause anytime and resume exactly from the last completed module.
 - **Human-in-the-Loop Interactivity**:
   - Interactive CLI prompts powered by `questionary`.
@@ -34,17 +40,17 @@ flowchart TD
     Start([START]) --> StartingNode{Starting Node}
 
     %% Branch 1: New Project
-    StartingNode -->|getInput| GetInput[Get User Inputs<br/>Topic, Prerequisites, Style, Depth, etc.]
-    GetInput --> GenRoadmap[Generate Roadmap<br/>Curriculum Planner via Master Prompt]
+    StartingNode -->|getInput| GetInput[Get User Inputs &amp; Select AI Model<br/>Topic, Model, Prerequisites, Style, Depth, etc.]
+    GetInput --> GenRoadmap[Generate Roadmap<br/>Curriculum Planner via Selected Model]
     GenRoadmap --> CreateFolder[Create Topic Folder<br/>& Save Initial State]
     CreateFolder --> GenMetaPrompt
 
     %% Branch 2: Continue Project
-    StartingNode -->|continue_from_last_state| LoadState[Load State<br/>Read &lt;topic&gt;/state.json]
-    LoadState --> GenMetaPrompt[Generate Meta-Prompt<br/>Craft module-specific instructions]
+    StartingNode -->|continue_from_last_state| LoadState[Load State &amp; Model<br/>Read &lt;topic&gt;/state.json]
+    LoadState --> GenMetaPrompt[Generate Meta-Prompt<br/>Craft module instructions via Selected Model]
 
     %% Generation Cycle
-    GenMetaPrompt --> GenContent[Generate Content<br/>LLM writes Markdown note]
+    GenMetaPrompt --> GenContent[Generate Content<br/>Selected Model writes Markdown note]
     GenContent --> CreateFile[Create File<br/>Save &lt;topic&gt;/&lt;slug&gt;.md &amp; Increment Progress]
     CreateFile --> HumanCheck{Human Intervention<br/>Continue process?}
 
@@ -65,7 +71,7 @@ flowchart TD
 Notes Maker/
 ├── Graph.py         # LangGraph definition (StateGraph wiring, edges, and compilation) [WIP]
 ├── Main.py          # Application entry point to run the compiled graph [WIP]
-├── Models.py        # Model initializations via Groq and OpenRouter (LangChain Chat Models)
+├── Models.py        # Model registry (AVAILABLE_MODELS, get_model, Groq/OpenRouter chat models)
 ├── Nodes.py         # Graph node implementations, questionary prompts, and state helpers
 ├── Prompts.py       # Prompt templates (Master Curriculum Prompt & Meta-Prompt Generator)
 ├── State.py         # TypedDict State definition for tracking workflow execution
@@ -80,19 +86,24 @@ Notes Maker/
 
 ### 1. State Definition (`State.py`)
 Tracks everything flowing through the LangGraph pipeline:
-- **User Configurations**: `topic`, `methodology`, `prequeist_knowledge`, `depth`, `level`, `teaching_style`
+- **User Configurations**: `topic`, `selected_model`, `show_preview`, `methodology`, `prequeist_knowledge`, `depth`, `level`, `teaching_style`
 - **Curriculum & Roadmap**: `question`, `roadmap` (list of modules with file slugs, titles, scope boundaries, and related files), `length`
 - **Execution Progress**: `progress` (index of current topic), `last_completed` (last executed node), `no_of_attempts_local`, `no_of_attempts_global`, `failed_at`
 - **Prompt & Content Artifacts**: `prompts` / `meta_prompt`, `filename`, `answers`, `summary`
 
 ### 2. Models (`Models.py`)
-Configures LLMs with low temperature (`0.1`) for structured reasoning and factual precision:
-| Variable | Model Name | Provider | Purpose |
-| :--- | :--- | :--- | :--- |
-| `chatgpt` | `openai/gpt-oss-20b` | Groq | Curriculum Architect (Roadmap & JSON generation) |
-| `meta` | `openai/gpt-oss-20b` | Groq | Meta-Prompt Engineer (module prompt synthesis) |
-| `qwen` | `qwen/qwen3.8-27b` | Groq | Content Generator (Markdown notes production) |
-| `ling` | `inclusionai/ling-3.0-flash-vl:free` | OpenRouter | Multimodal / fast tasks (optional/utility) |
+Models are centrally defined and registered in `AVAILABLE_MODELS`. At runtime, `get_model(state.get("selected_model"))` retrieves the chosen model for all graph operations.
+
+| Key | Model Name | Provider | Parameters | Characteristics |
+| :--- | :--- | :--- | :--- | :--- |
+| `chatgpt` | `openai/gpt-oss-120b` | Groq | `temp=0.1, max_tokens=8000` | High-capacity reasoning, deep conceptual mapping |
+| `meta` | `openai/gpt-oss-20b` | Groq | `temp=0.1, max_tokens=8000` | Fast, lightweight reasoning, low latency |
+| `qwen` | `qwen/qwen3.8-27b` | Groq | `temp=0.1, max_tokens=8000` | Rich formatting, structured notes, code & diagrams |
+| `space_bunny` | `stealth/space-bunny-alpha` | OpenRouter (Free) | `temp=0.1, max_tokens=8000` | 1M context window, fast inference, strong coding & structure |
+| `ling` | `inclusionai/ling-3.0-flash-vl:free` | OpenRouter (Free) | `temp=0.1, max_tokens=8000` | Lightweight multimodal utility |
+
+> [!TIP]
+> **Extensibility**: To add any other model, simply initialize it in `Models.py` (either via `init_chat_model` for Groq or `OpenRouterChatModel` for OpenRouter) and register it in `AVAILABLE_MODELS`. It will automatically appear in the interactive CLI selection menu!
 
 ### 3. Prompts (`Prompts.py`)
 - **`master_prompt`**: Deconstructs a high-level topic into a non-linear curriculum adhering to the defined depth, teaching style, and verbosity. Mandates strict JSON matching the curriculum schema.
@@ -100,11 +111,11 @@ Configures LLMs with low temperature (`0.1`) for structured reasoning and factua
 
 ### 4. Nodes & Flow Logic (`Nodes.py`)
 - `starting_node`: Prompts user to start fresh (`getInput`) or resume (`continue_from_last_state`).
-- `getInput`: Collects topic details via interactive `questionary` selects.
-- `continue_from_last_state`: Loads `<topic>/state.json` to resume interrupted workflows.
-- `generate_roadmap`: Calls `master_prompt`, parses curriculum JSON, creates topic directory.
-- `generate_meta_prompt`: Builds customized generation prompt for `state["roadmap"][state["progress"]]`.
-- `generate_content`: Calls Qwen to draft the study note.
+- `getInput`: Collects topic details, AI model selection (`chatgpt`, `meta`, `qwen`, `space_bunny`), and live output preview toggle (`show_preview`).
+- `continue_from_last_state`: Loads `<topic>/state.json` and restores the previously selected model and preview preferences.
+- `generate_roadmap`: Generates the curriculum JSON using the selected model via `get_model()`, displaying a live 3-line preview if enabled.
+- `generate_meta_prompt`: Builds specialized prompt instructions using the selected model via `get_model()`, displaying a live 3-line preview if enabled.
+- `generate_content`: Generates full Markdown note content using the selected model via `get_model()`, displaying a live 3-line preview if enabled.
 - `createFile`: Writes `<topic>/<filename>.md`, updates progress count.
 - `humanIntervention`: Prompts user whether to generate the next topic or pause.
 - `save_state` / `load_state`: Handles serialization to/from `<topic>/state.json`.
@@ -133,9 +144,11 @@ pip install langchain langchain-core langgraph questionary python-dotenv anyio
 ```
 
 ### 3. Configure API Keys
-Create a `.env` file in the root directory:
+Create a `.env` file in the root directory. Only `GROQ_API_KEY` is required for active pipeline execution:
 ```env
 GROQ_API_KEY="your_groq_api_key"
+
+# Optional (only if extending Models.py for experimental OpenRouter models like ling)
 OPENROUTER_API_KEY="your_openrouter_api_key"
 ```
 
@@ -144,7 +157,7 @@ OPENROUTER_API_KEY="your_openrouter_api_key"
 ## ⏳ Current Status & Roadmap
 
 - [x] State schema definition (`State.py`)
-- [x] Multi-model configurations (`Models.py`)
+- [x] Unified model pipeline configuration (`openai/gpt-oss-120b` via Groq in `Models.py`)
 - [x] Master curriculum prompt & Meta-prompt template (`Prompts.py`)
 - [x] Node functions, interactive Questionary menus, save/load state logic (`Nodes.py`)
 - [x] **Complete Graph Wiring (`Graph.py`)**:

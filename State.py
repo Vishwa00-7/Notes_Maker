@@ -10,6 +10,8 @@ class State(TypedDict, total=False):
     depth : str                 #depth of the study material
     level : str                 #level of the study material
     teaching_style : str        #teaching Style of study material
+    selected_model : str        #AI model selected to be used for the entire process
+    show_preview : bool         #Whether to show live preview of model output while working (first 3 lines)
 
     #Researcher
     question : str              #Input Question

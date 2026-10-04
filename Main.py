@@ -25,6 +25,8 @@ def main():
         "depth": "",
         "level": "",
         "teaching_style": "",
+        "selected_model": "chatgpt",
+        "show_preview": True,
         "question": "",
         "roadmap": [],
         "length": 0,
@@ -47,6 +49,7 @@ def main():
         print("[DONE] Workflow execution finished.")
         if final_state.get("topic"):
             print(f"Topic: {final_state.get('topic')}")
+            print(f"Model used: {final_state.get('selected_model', 'chatgpt')}")
             print(f"Modules completed: {final_state.get('progress', 0)} / {final_state.get('length', 0)}")
             print(f"Last node: {final_state.get('last_completed')}")
         print("=" * 80)
