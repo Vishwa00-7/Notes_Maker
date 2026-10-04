@@ -3,9 +3,21 @@ import re
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+import json_repair
 import questionary
+from Logger import (
+    log_decision,
+    log_dump,
+    log_error,
+    log_file_created,
+    log_model_output,
+    log_parsed_result,
+    log_prompt,
+    log_session_end,
+    set_active_topic,
+)
 from Models import AVAILABLE_MODELS, chatgpt, get_model, meta, qwen, space_bunny
 from Prompts import master_prompt, meta_prompt_genrator
 from State import State
@@ -72,6 +84,7 @@ def create_folder(name: str) -> bool:
     for attempt in range(1, 4):
         try:
             Path(safe_name).mkdir(parents=True, exist_ok=True)
+            set_active_topic(safe_name)
             return True
         except Exception as e:
             print(f"[WARN] [create_folder] Attempt {attempt}/3 failed for '{safe_name}': {e}")
@@ -134,27 +147,160 @@ def load_state(topic: str) -> Optional[State]:
     return None
 
 
-def extract_json_payload(raw_content: str) -> dict:
-    """Robustly extract and parse JSON from LLM output, handling markdown blocks."""
-    content = raw_content.strip()
-    # Strip markdown code fences if present
-    if "```json" in content:
-        content = content.split("```json", 1)[1].split("```", 1)[0].strip()
-    elif "```" in content:
-        content = content.split("```", 1)[1].split("```", 1)[0].strip()
+def extract_json_payload(raw_content: Any) -> dict:
+    """
+    Robustly extract and parse JSON from LLM output, handling markdown blocks,
+    reasoning tags (<think>...</think>), unclosed code fences, truncated outputs,
+    missing commas, unescaped quotes, and list schemas.
+    """
+    if isinstance(raw_content, dict):
+        parsed = raw_content
+    elif isinstance(raw_content, list):
+        parsed = {"curriculum": raw_content}
+    else:
+        text = str(raw_content).strip()
 
-    # If pure json.loads works
-    try:
-        return json.loads(content)
-    except Exception:
-        pass
+        # 1. Strip reasoning blocks from thinking models (<think>...</think> or <reasoning>...</reasoning>)
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+        text = re.sub(r"<reasoning>.*?</reasoning>", "", text, flags=re.DOTALL).strip()
 
-    # Regex search for outermost JSON object { ... }
-    match = re.search(r"(\{.*\})", content, re.DOTALL)
-    if match:
-        return json.loads(match.group(1))
+        # 2. Extract content from code fences if present (even if closing fence is missing due to truncation)
+        if "```json" in text:
+            parts = text.split("```json", 1)[1]
+            if "```" in parts:
+                text = parts.split("```", 1)[0].strip()
+            else:
+                text = parts.strip()
+        elif "```" in text:
+            parts = text.split("```", 1)[1]
+            if "```" in parts:
+                text = parts.split("```", 1)[0].strip()
+            else:
+                text = parts.strip()
 
-    raise ValueError(f"Could not parse valid JSON from response: {raw_content[:200]}...")
+        # 3. Try standard json.loads
+        parsed = None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            pass
+
+        # 4. Try json_repair on the cleaned text
+        if parsed is None:
+            try:
+                parsed = json_repair.loads(text)
+                if parsed:
+                    log_dump("INFO", "Repaired malformed/truncated JSON successfully using json_repair.")
+            except Exception:
+                pass
+
+        # 5. Try slicing from outermost { or [
+        if parsed is None:
+            first_brace = text.find("{")
+            first_bracket = text.find("[")
+            start_idx = -1
+            if first_brace != -1 and first_bracket != -1:
+                start_idx = min(first_brace, first_bracket)
+            elif first_brace != -1:
+                start_idx = first_brace
+            elif first_bracket != -1:
+                start_idx = first_bracket
+
+            if start_idx != -1:
+                sub_text = text[start_idx:]
+                try:
+                    parsed = json_repair.loads(sub_text)
+                except Exception:
+                    pass
+
+        # 6. Fallback: manual truncation recovery by trimming back to last closed object '}'
+        if parsed is None and "{" in text:
+            first_brace = text.find("{")
+            last_close_brace = text.rfind("}")
+            if first_brace != -1 and last_close_brace > first_brace:
+                candidate = text[first_brace:last_close_brace + 1]
+                open_b = candidate.count("[") - candidate.count("]")
+                open_c = candidate.count("{") - candidate.count("}")
+                candidate += ("]" * max(0, open_b)) + ("}" * max(0, open_c))
+                try:
+                    parsed = json_repair.loads(candidate)
+                except Exception:
+                    try:
+                        parsed = json.loads(candidate)
+                    except Exception:
+                        pass
+
+        if parsed is None:
+            raise ValueError(f"Could not parse valid JSON from response (Length: {len(text)}): {text[:250]}...")
+
+    # Normalize parsed data into {"curriculum": [ ... ]}
+    raw_list: List[Any] = []
+    if isinstance(parsed, list):
+        raw_list = parsed
+    elif isinstance(parsed, dict):
+        for key in ["curriculum", "roadmap", "modules", "topics", "content", "data"]:
+            if key in parsed and isinstance(parsed[key], list):
+                raw_list = parsed[key]
+                break
+        if not raw_list:
+            for v in parsed.values():
+                if isinstance(v, list) and v:
+                    raw_list = v
+                    break
+
+    if not raw_list:
+        raise ValueError(
+            f"Curriculum modules list is missing or empty in parsed response: "
+            f"{list(parsed.keys()) if isinstance(parsed, dict) else parsed}"
+        )
+
+    # Standardize each module in the curriculum list
+    normalized_curriculum = []
+    for idx, item in enumerate(raw_list, 1):
+        if isinstance(item, dict):
+            title = str(item.get("title") or item.get("name") or item.get("module") or f"Module {idx}").strip()
+            slug = str(item.get("file_slug") or item.get("slug") or f"{sanitize_name(title)}.md").strip()
+            if not slug.endswith(".md"):
+                slug += ".md"
+            scope = str(item.get("scope_boundary") or item.get("description") or item.get("scope") or "Module scope definition.").strip()
+
+            raw_related = item.get("related_files", [])
+            related_files = []
+            if isinstance(raw_related, list):
+                for rel in raw_related:
+                    if isinstance(rel, dict):
+                        rel_slug = str(rel.get("slug") or rel.get("file_slug") or "").strip()
+                        rel_reason = str(rel.get("reason") or "Directly connects conceptually.").strip()
+                        if rel_slug:
+                            if not rel_slug.endswith(".md"):
+                                rel_slug += ".md"
+                            related_files.append({"slug": rel_slug, "reason": rel_reason})
+                    elif isinstance(rel, str) and rel.strip():
+                        r_slug = rel.strip()
+                        if not r_slug.endswith(".md"):
+                            r_slug += ".md"
+                        related_files.append({"slug": r_slug, "reason": "Connected module."})
+
+            normalized_curriculum.append({
+                "title": title,
+                "file_slug": slug,
+                "scope_boundary": scope,
+                "related_files": related_files
+            })
+        elif isinstance(item, str) and item.strip():
+            title = item.strip()
+            slug = f"{sanitize_name(title)}.md"
+            normalized_curriculum.append({
+                "title": title,
+                "file_slug": slug,
+                "scope_boundary": f"In-depth foundational study covering {title}.",
+                "related_files": []
+            })
+
+    if not normalized_curriculum:
+        raise ValueError("Could not extract any valid curriculum modules from LLM response.")
+
+    return {"curriculum": normalized_curriculum}
 
 
 def print_output_preview(content: str, max_lines: int = 3, label: str = "Model Output") -> None:
@@ -221,6 +367,12 @@ def error_human_intervention(
     except Exception as e:
         print(f"[WARN] Prompt input failed ({e}). Defaulting to 'Save state and stop'.")
         selection = choices[0]
+
+    log_decision(
+        f"Error Human Intervention ({failed_node})",
+        selection,
+        {"error_message": error_message, "topic": state.get("topic")}
+    )
 
     if not selection or "1. Save" in selection:
         print(f"\n[SAVE] [Intervention] Saving state for topic '{state.get('topic', 'unnamed')}'...")
@@ -294,6 +446,7 @@ def execute_with_retry(
                 state["no_of_attempts_local"] = state.get("no_of_attempts_local", 0) + 1
                 state["no_of_attempts_global"] = state.get("no_of_attempts_global", 0) + 1
                 state["failed_at"] = node_name
+                log_error(node_name, e, attempt=try_count)
                 print(f"[WARN] [{node_name}] Error on attempt {try_count}/{max_retries}: {e}")
                 if try_count < max_retries:
                     time.sleep(1.5 * try_count)
@@ -327,11 +480,12 @@ def starting_node(state: State) -> str:
             choices=["getInput", "continue_from_last_state"],
             default="getInput"
         ).ask()
-        if question == "continue_from_last_state":
-            return "continue_from_last_state"
-        return "getInput"
+        res = "continue_from_last_state" if question == "continue_from_last_state" else "getInput"
+        log_decision("Starting Node Selection", res)
+        return res
     except (KeyboardInterrupt, Exception) as e:
         print(f"[WARN] [starting_node] Selection interrupted or failed ({e}). Defaulting to 'getInput'.")
+        log_decision("Starting Node Selection (Interrupted)", "getInput", {"error": str(e)})
         return "getInput"
 
 
@@ -347,6 +501,7 @@ def continue_from_last_state(state: State) -> Dict[str, Any]:
 
             loaded_state = load_state(topic)
             if loaded_state:
+                set_active_topic(topic)
                 saved_model = loaded_state.get("selected_model")
                 if not saved_model:
                     model_choices = list(AVAILABLE_MODELS.keys())
@@ -359,6 +514,16 @@ def continue_from_last_state(state: State) -> Dict[str, Any]:
                     print(f"[MODEL] Resuming with model: '{saved_model}'")
 
                 saved_preview = loaded_state.get("show_preview", True)
+
+                log_decision(
+                    "Resume Topic State",
+                    topic,
+                    {
+                        "selected_model": saved_model,
+                        "progress": loaded_state.get("progress", 0),
+                        "total_modules": loaded_state.get("length", len(loaded_state.get("roadmap", [])))
+                    }
+                )
 
                 return {
                     "topic": loaded_state.get("topic", topic),
@@ -436,6 +601,19 @@ def getInput(state: State) -> Dict[str, Any]:
         if not teaching_style or teaching_style == "Like ChatGPT":
             teaching_style = dictionary_for_chatGPT["teaching_style"]
 
+        set_active_topic(topic)
+        decisions = {
+            "topic": topic,
+            "prequeist_knowledge": pk,
+            "selected_model": selected_model,
+            "show_preview": show_preview,
+            "methodology": methodology,
+            "depth": depth,
+            "teaching_style": teaching_style,
+            "level": level
+        }
+        log_decision("User Input Configuration (getInput)", selected_model, decisions)
+
         return {
             "topic": topic,
             "prequeist_knowledge": pk,
@@ -451,10 +629,9 @@ def getInput(state: State) -> Dict[str, Any]:
             "no_of_attempts_global": 0,
             "failed_at": ""
         }
-
     except (KeyboardInterrupt, Exception) as e:
         print(f"[WARN] [getInput] Input interrupted or failed: {e}")
-        return {
+        fallback_data = {
             "topic": state.get("topic", "Default Study"),
             "prequeist_knowledge": state.get("prequeist_knowledge", "None"),
             "selected_model": state.get("selected_model", list(AVAILABLE_MODELS.keys())[0]),
@@ -469,6 +646,8 @@ def getInput(state: State) -> Dict[str, Any]:
             "no_of_attempts_global": 1,
             "failed_at": "getInput"
         }
+        log_decision("User Input (Interrupted)", "Default fallback applied", fallback_data)
+        return fallback_data
 
 
 def generate_roadmap(state: State) -> Dict[str, Any]:
@@ -485,9 +664,20 @@ def generate_roadmap(state: State) -> Dict[str, Any]:
         })
 
         model_name = state.get("selected_model", "chatgpt")
+        prompt_text = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
+        log_prompt("generate_roadmap", model_name, prompt_text, attempt=state.get("no_of_attempts_local", 0) + 1)
+
         model = get_model(model_name)
         result = model.invoke(prompt)
         raw_content = result.content if hasattr(result, "content") else str(result)
+
+        log_model_output(
+            "generate_roadmap",
+            model_name,
+            raw_content,
+            attempt=state.get("no_of_attempts_local", 0) + 1
+        )
+
         if not raw_content or not raw_content.strip():
             raise ValueError("Curriculum planner returned empty response. Check token limits.")
 
@@ -500,10 +690,16 @@ def generate_roadmap(state: State) -> Dict[str, Any]:
         if not curriculum:
             raise ValueError("Curriculum is empty in LLM response.")
 
+        log_parsed_result(
+            "generate_roadmap",
+            f"Successfully generated {len(curriculum)} modules",
+            [{"title": m.get("title"), "file_slug": m.get("file_slug")} for m in curriculum]
+        )
         print(f"[SUCCESS] Roadmap successfully generated with {len(curriculum)} modules (Model: '{model_name}').")
 
         # Create a folder with the name of the topic
-        create_folder(state.get("topic", "default_topic"))
+        topic = state.get("topic", "default_topic")
+        create_folder(topic)
 
         return {
             "roadmap": curriculum,
@@ -545,11 +741,20 @@ def generate_meta_prompt(state: State) -> Dict[str, Any]:
             "last_completed": "generate_meta_prompt"
         })
 
-        # Call selected LLM to generate the specialized downstream prompt
         model_name = state.get("selected_model", "chatgpt")
+        prompt_text = prompt.to_string() if hasattr(prompt, "to_string") else str(prompt)
+        log_prompt("generate_meta_prompt", model_name, prompt_text, attempt=state.get("no_of_attempts_local", 0) + 1)
+
         model = get_model(model_name)
         res = model.invoke(prompt)
         meta_prompt_text = res.content if hasattr(res, "content") else str(res)
+
+        log_model_output(
+            "generate_meta_prompt",
+            model_name,
+            meta_prompt_text,
+            attempt=state.get("no_of_attempts_local", 0) + 1
+        )
 
         if state.get("show_preview", True):
             print_output_preview(meta_prompt_text, max_lines=3, label=f"Meta-Prompt for '{title}' ({model_name})")
@@ -578,14 +783,23 @@ def generate_content(state: State) -> Dict[str, Any]:
             raise ValueError("No meta_prompt found in state to generate content.")
 
         model_name = state.get("selected_model", "chatgpt")
+        note_slug = state.get("filename", f"module_{state.get('progress', 0)}")
+        log_prompt("generate_content", model_name, prompt, attempt=state.get("no_of_attempts_local", 0) + 1)
+
         model = get_model(model_name)
         result = model.invoke(prompt)
         content = result.content if hasattr(result, "content") else str(result)
         if not content or not content.strip():
             raise ValueError("Generated content from model was empty.")
 
+        log_model_output(
+            "generate_content",
+            model_name,
+            content,
+            attempt=state.get("no_of_attempts_local", 0) + 1
+        )
+
         if state.get("show_preview", True):
-            note_slug = state.get("filename", f"module_{state.get('progress', 0)}")
             print_output_preview(content, max_lines=3, label=f"Generated Note Content for '{note_slug}' ({model_name})")
 
         print(f"[SUCCESS] Module content successfully generated (Model: '{model_name}').")
@@ -620,6 +834,7 @@ def createFile(state: State) -> Dict[str, Any]:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
 
+        log_file_created(str(file_path), len(content))
         print(f"[FILE] Successfully created note: '{file_path}'")
         return {
             "progress": state.get("progress", 0) + 1,
@@ -642,6 +857,11 @@ def humanIntervention(state: State) -> str:
         total_length = state.get("length", len(state.get("roadmap", [])))
 
         if progress >= total_length:
+            log_decision(
+                "Human Intervention",
+                "All modules completed",
+                {"progress": progress, "total": total_length}
+            )
             return "process_completed"
 
         choice = questionary.confirm(
@@ -649,12 +869,20 @@ def humanIntervention(state: State) -> str:
             default=True
         ).ask()
 
+        decision_str = "Continue to next module" if choice else "Stop pipeline"
+        log_decision(
+            "Human Intervention",
+            decision_str,
+            {"progress": progress, "total": total_length}
+        )
+
         if choice:
             return "generate_meta_prompt"
         else:
             return "stop_the_process"
     except (KeyboardInterrupt, Exception) as e:
         print(f"[WARN] [humanIntervention] Prompt interrupted ({e}). Stopping gracefully.")
+        log_decision("Human Intervention (Interrupted)", "stop_the_process", {"error": str(e)})
         return "stop_the_process"
 
 
@@ -665,6 +893,15 @@ def stop_the_process(state: State) -> Dict[str, Any]:
         save_state(state)
     else:
         print("[INFO] State was not saved as requested.")
+    log_session_end(
+        status="stopped",
+        summary={
+            "topic": state.get("topic"),
+            "progress": state.get("progress", 0),
+            "length": state.get("length", 0),
+            "last_completed": "stop_the_process"
+        }
+    )
     return {
         "last_completed": "stop_the_process"
     }
@@ -674,6 +911,15 @@ def process_completed(state: State) -> Dict[str, Any]:
     """Finalize successful pipeline execution and persist state to disk."""
     print("\n[DONE] Process Completed! All modules have been successfully generated.")
     save_state(state)
+    log_session_end(
+        status="completed",
+        summary={
+            "topic": state.get("topic"),
+            "progress": state.get("progress", 0),
+            "length": state.get("length", 0),
+            "last_completed": "process_completed"
+        }
+    )
     return {
         "last_completed": "process_completed"
     }

@@ -1,5 +1,6 @@
 import sys
 from Graph import app
+from Logger import log_dump, log_error, log_session_end, log_session_start
 from Nodes import save_state
 from State import State
 
@@ -16,6 +17,7 @@ def print_banner():
 
 def main():
     print_banner()
+    log_session_start()
 
     # Initial state template
     initial_state: State = {
@@ -55,12 +57,14 @@ def main():
         print("=" * 80)
     except KeyboardInterrupt:
         print("\n\n[WARN] Execution interrupted by user (Ctrl+C).")
+        log_session_end(status="interrupted_by_user", summary={"state": initial_state})
         if initial_state.get("topic"):
             print(f"[SAVE] Preserving current state for '{initial_state.get('topic')}'...")
             save_state(initial_state)
         sys.exit(0)
     except Exception as e:
         print(f"\n[ERROR] Uncaught exception during graph execution: {e}")
+        log_error("main", e)
         sys.exit(1)
 
 

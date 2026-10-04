@@ -5,17 +5,21 @@ master_prompt = ChatPromptTemplate.from_template(
 """
 Role: You are an expert Curriculum Architect designing a non-linear knowledge graph. Your job is to break down a central subject into a logical network of distinct sub-topics.
 
-Objective: Given a core topic, prerequisite knowledge, methodology, depth, verbosity level, and teaching style, generate a highly structured list of discrete modules and map all conceptual overlaps between them.
+Objective: Given a core topic, prerequisite knowledge, methodology, depth, verbosity level, and teaching style, generate a highly structured list of discrete modules and map key conceptual overlaps between them.
 
 Strict Constraints:
 
-Zero Overlap: Each module MUST have a strictly defined, mutually exclusive scope.
+1. Curriculum Size: Generate a structured curriculum consisting of 8 to 14 discrete, high-impact modules that systematically cover the subject from foundations to advanced concepts. Do NOT exceed 16 modules.
 
-Knowledge Graph (Cross-Linking): Identify every other module in the curriculum that conceptually connects to the current module to enable non-linear traversal.
+2. Zero Overlap: Each module MUST have a strictly defined, mutually exclusive scope.
 
-Thematic Alignment: Adapt the module titles and scope framing to fit the {teaching_style} (e.g., if Socratic, formulate titles as core questions). Adjust the breadth of each module's scope based on the {verbosity_level}.
+3. Knowledge Graph (Cross-Linking): For each module, identify 2 to 4 of the most direct, essential conceptual connections to other modules in the 'related_files' array (do NOT list every single module). Keep each connection 'reason' concise (1 short sentence).
 
-Output Format: You must output ONLY valid JSON matching the schema below.
+4. Scope Boundary: Keep each 'scope_boundary' concise (1-2 clear sentences defining what this file covers and what it leaves to other modules).
+
+5. Thematic Alignment: Adapt the module titles and scope framing to fit the {teaching_style} (e.g., if Socratic, formulate titles as core questions). Adjust the breadth of each module's scope based on the {verbosity_level}.
+
+6. Output Format: You must output ONLY valid, strictly formatted JSON matching the schema below. Do not include markdown preamble or conversational text outside the JSON. Ensure all quotes within strings are properly escaped.
 
 Input Variables:
 
@@ -32,7 +36,6 @@ Verbosity Level: {verbosity_level}
 Teaching Style: {teaching_style}
 
 Expected JSON Output Schema:
-
 
 {{
   "curriculum": [

@@ -140,7 +140,7 @@ source venv/bin/activate
 
 ### 2. Install Dependencies
 ```bash
-pip install langchain langchain-core langgraph questionary python-dotenv anyio
+pip install langchain langchain-core langgraph questionary python-dotenv anyio json-repair
 ```
 
 ### 3. Configure API Keys
@@ -148,7 +148,7 @@ Create a `.env` file in the root directory. Only `GROQ_API_KEY` is required for 
 ```env
 GROQ_API_KEY="your_groq_api_key"
 
-# Optional (only if extending Models.py for experimental OpenRouter models like ling)
+# Optional (only if extending Models.py for experimental OpenRouter models like ling or space_bunny)
 OPENROUTER_API_KEY="your_openrouter_api_key"
 ```
 
@@ -157,7 +157,7 @@ OPENROUTER_API_KEY="your_openrouter_api_key"
 ## ⏳ Current Status & Roadmap
 
 - [x] State schema definition (`State.py`)
-- [x] Unified model pipeline configuration (`openai/gpt-oss-120b` via Groq in `Models.py`)
+- [x] Unified model pipeline configuration (`openai/gpt-oss-120b` via Groq, OpenRouter models like `space_bunny` in `Models.py`)
 - [x] Master curriculum prompt & Meta-prompt template (`Prompts.py`)
 - [x] Node functions, interactive Questionary menus, save/load state logic (`Nodes.py`)
 - [x] **Complete Graph Wiring (`Graph.py`)**:
@@ -166,9 +166,12 @@ OPENROUTER_API_KEY="your_openrouter_api_key"
   - Compile the graph (`app = graph.compile()`).
 - [x] **CLI Execution Harness (`Main.py`)**:
   - Initialize empty state and invoke the compiled LangGraph with graceful interrupt/exit handling.
-- [x] **Robust Output Parsing**:
-  - Regex and code-fence parsing in `extract_json_payload` replacing fragile `eval()`.
+- [x] **Robust Output Parsing & Auto-Repair**:
+  - Resilient `extract_json_payload` powered by `json-repair`: handles reasoning tags (`<think>`), unclosed code fences, missing commas, unescaped quotes, truncated output auto-closing, and list schema normalization.
+- [x] **Comprehensive Event & Output Logging (`dump.txt`)**:
+  - Automatic `dump.txt` logging capturing every user decision, rendered prompt, unedited model output, parsed data, error trace, and file creation.
 - [x] **Enhanced Error Handling & Retries**:
   - 3-attempt automatic retry engine with progressive backoff.
   - Interactive `error_human_intervention` (Save & stop, Retry, Continue).
   - State tracking for `no_of_attempts_local`, `no_of_attempts_global`, and `failed_at`.
+

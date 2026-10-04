@@ -112,8 +112,15 @@ class OpenRouterChatModel(SimpleChatModel):
 
         # Strictly enforce non-null string type to guarantee AIMessage Pydantic v2 validation passes
         content_str = str(content or "").strip()
+        finish_reason = choices[0].get("finish_reason")
+
+        if finish_reason == "length":
+            print(
+                f"[WARN] OpenRouter model '{self.model_name}' hit maximum token limit "
+                f"(finish_reason: length). Output was truncated and will be auto-repaired."
+            )
+
         if not content_str:
-            finish_reason = choices[0].get("finish_reason")
             raise RuntimeError(
                 f"OpenRouter model '{self.model_name}' returned empty content (finish_reason: {finish_reason}). "
                 "Tokens may have been exhausted by reasoning or provider returned blank output. Retrying..."
@@ -152,7 +159,7 @@ qwen = init_chat_model(
 space_bunny = OpenRouterChatModel(
     model_name="stealth/space-bunny-alpha",
     temperature=0.1,
-    max_tokens=12000,
+    max_tokens=16000,
     reasoning_effort="medium"
 )
 
